@@ -3,26 +3,23 @@ import os
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 import json
+from prompt_func import prompt_fun
+from plyer import notification
+import requests
 
-
-# conn = snowflake.connector.connect(
-#     user='YOGESWARI',
-#     password='Sivanesh@245678',
-#     account='PTYRWQT-XG16686',
-#     warehouse='COMPUTE_WH',
-#     database='HEALTHCARE',
-#     schema='CLINICAL',
-#     role='ACCOUNTADMIN'
-# )
-
-# cursor = conn.cursor()
-
+from email.message import EmailMessage
 from typing import TypedDict, List, Dict, Optional
 import datetime
 import snowflake.connector
+import smtplib
 from langgraph.graph import StateGraph, END
 import getpass
 load_dotenv()
+
+USER_EMAIL_MAP = {
+    "YOGESWARI": "yogeswariyrsk@gmail.com",
+    "BOB": "bob@example.com",
+}
 
 # 1️⃣ Define TypedDict-based State
 
@@ -54,8 +51,8 @@ class State(TypedDict, total=False):
 def fetch_queries(state: State) -> State:
     conn = snowflake.connector.connect(
         user='YOGESWARI',
-        password='Sivanesh@245678',
-        account='PTYRWQT-XG16686',
+        password=os.getenv("SNOWFLAKE_PASSWORD"),
+        account=os.getenv("SNOWFLAKE_ACCOUNT"),
         warehouse='COMPUTE_WH',
         database='HEALTHCARE',
         schema='CLINICAL',
@@ -91,7 +88,6 @@ if not os.path.exists(seen_file):
 
 def filter_long_running(state: State) -> State:
    
-
     now = datetime.datetime.now(datetime.timezone.utc)
 
     if os.path.exists(seen_file):
@@ -102,7 +98,7 @@ def filter_long_running(state: State) -> State:
     for q in state.get("running_queries", []):
         if q["EXECUTION_STATUS"] == "RUNNING":
             runtime = now - q["START_TIME"]
-            if runtime.total_seconds() > 20:  # 15 minutes
+            if runtime.total_seconds() > 10:  # 15 minutes
                 if q["QUERY_ID"] not in seen_ids:
                     fresh_long_running.append(q)
 
@@ -125,225 +121,8 @@ llm = init_chat_model("llama-3.1-8b-instant", model_provider="groq")
 def analyze_query(state: State) -> State:
     analyses: List[QueryAnalysis] = []
     for query in state.get("long_running_queries", []):
-        prompt = f"""
-        You're an SQL expert in optimizing the queries and finding out the incorrect 
-        usages of joins or filters in the queries. You'll be provided with queries that 
-        are long running for more than 15 mins in snowflake. You have to analyze and identify 
-        the performance issues. If the query is well-written and does not contain any clear 
-        inefficiencies, you should conclude that the query is likely slow due to large data volume, 
-        and no optimization is needed.
-
-        The following are the factors to be considered for performance issues.
-
-        - Cartesian products
-        - Missing or incorrect JOINs
-        - SELECT * usage
-        - Lack of filters or WHERE clause
-
-        Only respond with a performance issue **if** you find one of these problems based on the 
-        SQL query. 
-        If the query does **not** suffer from any of the above issues, reply:
-        > "✅ The query appears well-structured. The long execution time is likely due to 
-        the volume of data processed. No optimization needed."
-
-        SQL: ```{query['QUERY_TEXT']}```
-
-
-        The following are the DDLs of the tables
-        present in Database 'Healthcare' and schema 'Clinical'.
-
-        CREATE TABLE Patients (
-            patient_id STRING PRIMARY KEY,
-            first_name STRING,
-            last_name STRING,
-            dob DATE,
-            gender STRING,
-            phone STRING,
-            email STRING,
-            address STRING,
-            blood_type STRING,
-            ethnicity STRING,
-            marital_status STRING,
-            emergency_contact STRING,
-            registration_date DATE
-        );
-
-
-        CREATE TABLE Providers (
-            provider_id STRING PRIMARY KEY,
-            first_name STRING,
-            last_name STRING,
-            specialty STRING,
-            phone STRING,
-            email STRING,
-            department_id STRING,
-            license_number STRING,
-            years_of_experience NUMBER,
-            availability_status STRING
-        );
-
-        CREATE TABLE Departments (
-            department_id STRING PRIMARY KEY,
-            name STRING,
-            floor NUMBER,
-            head_provider_id STRING,
-            contact_number STRING,
-            open_hours STRING
-        );
-
-        CREATE TABLE Rooms (
-            room_id STRING PRIMARY KEY,
-            room_number STRING,
-            floor NUMBER,
-            room_type STRING,
-            occupancy_status STRING,
-            bed_count NUMBER
-        );
-
-        CREATE TABLE Appointments (
-            appointment_id STRING PRIMARY KEY,
-            patient_id STRING,
-            provider_id STRING,
-            appointment_date DATE,
-            appointment_time TIME,
-            status STRING,
-            reason_for_visit STRING,
-            room_id STRING
-        );
-
-        CREATE TABLE Visits (
-            visit_id STRING PRIMARY KEY,
-            patient_id STRING,
-            provider_id STRING,
-            department_id STRING,
-            visit_date DATE,
-            visit_type STRING,
-            chief_complaint STRING,
-            discharge_date DATE,
-            room_id STRING
-        );
-
-        CREATE TABLE Diagnoses (
-            diagnosis_id STRING PRIMARY KEY,
-            visit_id STRING,
-            icd10_code STRING,
-            diagnosis_name STRING,
-            diagnosis_type STRING,
-            diagnosis_date DATE
-        );
-
-        CREATE TABLE Procedures (
-            procedure_id STRING PRIMARY KEY,
-            visit_id STRING,
-            cpt_code STRING,
-            procedure_name STRING,
-            procedure_date DATE,
-            performed_by STRING,
-            notes STRING
-        );
-
-        CREATE TABLE Medications (
-            medication_id STRING PRIMARY KEY,
-            visit_id STRING,
-            drug_name STRING,
-            dosage STRING,
-            route STRING,
-            frequency STRING,
-            start_date DATE,
-            end_date DATE,
-            prescribed_by STRING
-        );
-
-        CREATE TABLE Lab_Results (
-            lab_result_id STRING PRIMARY KEY,
-            visit_id STRING,
-            test_name STRING,
-            test_code STRING,
-            sample_collected_date DATE,
-            result_date DATE,
-            result_value STRING,
-            normal_range STRING,
-            units STRING,
-            abnormal_flag BOOLEAN
-        );
-
-        CREATE TABLE Allergies (
-            allergy_id STRING PRIMARY KEY,
-            patient_id STRING,
-            allergen STRING,
-            reaction STRING,
-            severity STRING,
-            status STRING,
-            recorded_date DATE
-        );
-
-        CREATE TABLE Vital_Signs (
-            vital_sign_id STRING PRIMARY KEY,
-            visit_id STRING,
-            recorded_date DATE,
-            height_cm NUMBER,
-            weight_kg NUMBER,
-            temperature_c NUMBER,
-            heart_rate NUMBER,
-            blood_pressure STRING,
-            respiratory_rate NUMBER,
-            oxygen_saturation NUMBER
-        );
-
-        CREATE TABLE Insurance (
-            insurance_id STRING PRIMARY KEY,
-            patient_id STRING,
-            provider_name STRING,
-            policy_number STRING,
-            coverage_start DATE,
-            coverage_end DATE,
-            plan_type STRING,
-            copay_amount NUMBER,
-            status STRING
-        );
-
-        CREATE TABLE Billing (
-            billing_id STRING PRIMARY KEY,
-            visit_id STRING,
-            insurance_id STRING,
-            total_cost NUMBER,
-            patient_payable_amount NUMBER,
-            billing_date DATE,
-            payment_status STRING,
-            due_date DATE,
-            paid_date DATE
-        );
-
-        CREATE TABLE Devices (
-            device_id STRING PRIMARY KEY,
-            name STRING,
-            department_id STRING,
-            purchase_date DATE,
-            last_maintenance_date DATE,
-            status STRING,
-            used_in_procedure_id STRING
-        );
-
-        For examples:
-
-        Example 1:
-
-        SQL_QUERY: 
-        SELECT * FROM APPOINTMENTS
-        JOIN PATIENTS;
-
-        The query is missing a join condition and it would result in a cartesian product. 
-
-        At the end, return the following JSON object on a new line. The confidence score
-        is your confidence in the accuracy of this analysis. 
-
-        {{
-        "issues_found": true,        // true if performance or logic issues are found
-        "confidence_score": 0–100    // your confidence in the accuracy of this analysis
-        }}
-
-        """
-        result = llm.predict(prompt)
+        prompt=prompt_fun(query["QUERY_TEXT"])
+        result=llm.invoke(prompt).content
         analyses.append({"query": query, "analysis": result})
     state["analyses"] = analyses
     return state
@@ -373,6 +152,31 @@ def check_for_issues(state: State) -> State:
     state["flagged_queries"] = flagged
     return state
 
+def send_email(subject:str,body:str,to:str):
+    try:
+        msg=EmailMessage()
+        msg["Subject"]=subject
+        msg["From"]=os.getenv("SMTP_SENDER")
+        msg["To"]=to
+
+        msg.set_content(body)
+        with smtplib.SMTP("smtp.gmail.com",587) as smtp:
+            smtp.starttls()
+            smtp.login(os.getenv("SMTP_USERNAME"),os.getenv("SMTP_PASSWORD"))
+            smtp.send_message(msg)
+    except Exception as e:
+        print("Email error:",e)
+
+
+
+def send_slack_notification(message: str, webhook_url: str):
+    payload = {"text": message}
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(webhook_url, json=payload, headers=headers)
+    
+    if response.status_code != 200:
+        raise ValueError(f"Slack notification failed: {response.status_code}, {response.text}")
+
 
 # 6️⃣ Node: Notify the user
 
@@ -381,6 +185,8 @@ def notify_user(state: State) -> State:
     for item in state.get("flagged_queries", []):
         user = item["query"]["USER_NAME"]
         query_id = item["query"]["QUERY_ID"]
+        mail_id=USER_EMAIL_MAP[user]
+        print("mail_id",mail_id)
         message = f"""
         🚨 Long-running query flagged for potential issues:
         User: {user}
@@ -393,6 +199,13 @@ def notify_user(state: State) -> State:
             "query_id": query_id,
             "message": message.strip()
         })
+        send_email("Query Alert",message,mail_id)
+        
+        send_slack_notification(
+    "🚨 Query issue detected",
+    webhook_url="https://hooks.slack.com/services/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"
+)
+
     state["notifications_sent"] = notifications
     return state
 
