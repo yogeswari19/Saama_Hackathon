@@ -7,7 +7,7 @@ from prompt_func import prompt_fun
 from plyer import notification
 import requests
 
-from email.message import EmailMessage
+
 from typing import TypedDict, List, Dict, Optional
 import datetime
 import snowflake.connector
